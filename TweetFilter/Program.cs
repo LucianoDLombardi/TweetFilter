@@ -2,9 +2,14 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
+using System.Threading.Tasks;
+using System.Diagnostics;
 
+//Comman line solution to the IQVIA bad api.
+//The user can input a start and end date and the application will report the distinct tweets within the 
+//given time period
 
-namespace TweetFilter
+namespace AllTweets
 {
     //Tweet Model
     public class Tweet
@@ -14,7 +19,7 @@ namespace TweetFilter
         public string text { get; set; }
     }
 
-    //Class to check for duplicate tweets
+    //Helper class to check for duplicate tweets
     public class TweetComparer : IEqualityComparer<Tweet>
     {
         public bool Equals(Tweet x, Tweet y)
@@ -36,13 +41,22 @@ namespace TweetFilter
     class Program
     {
         static string baseURI = "https://badapi.Iqvia.io/";
+        // Use HttpClient.
+        static HttpClient client;
+        static Newtonsoft.Json.JsonSerializerSettings js;
+
+        //Initialize comparer to check for duplcate twees
+        static TweetComparer tweetComp = new TweetComparer();
+
+        //List of tweets with no duplicates
+        static List<Tweet> filteredtweets;
 
         static void Main(string[] args)
         {
-            //Set window to be a bit wider than default
+            //Set window to be wider than default
             Console.WindowWidth = (int)(0.8 * Console.LargestWindowWidth);
 
-            //Increase the buffer height to attempt to show all tweets
+            //Increase the buffer height to show all tweets
             Console.BufferHeight = 20000;
 
             //Get dates from user and check if they are valid
@@ -54,85 +68,66 @@ namespace TweetFilter
             //Retrieve and output tweets
             DownloadTweets(startDate, endDate);
 
+            // ... Display the results
+            foreach (var tweet in filteredtweets)
+            {
+                Console.WriteLine("ID: {0}, {1}", tweet.id, tweet.stamp);
+                Console.WriteLine("Tweet: {0}\n", tweet.text);
+            }
+
+            Console.WriteLine("Total number of distinct tweets between {0} and {1} is {2}", startDate, endDate, filteredtweets.Count);
             Console.ReadLine();
         }
 
-        static async void DownloadTweets(string startDate, string endDate)
+        private static void DownloadTweets(string startDate, string endDate)
         {
-            //List of tweets with no duplicates
-            List<Tweet> filteredtweets = new List<Tweet>();
+            //Stopwatch sw = new Stopwatch();
+            //sw.Start();
+
+            filteredtweets = new List<Tweet>();
 
             // Target.
             string strGetRequest = "api/v1/Tweets?startDate=" + startDate + "&endDate=" + endDate;
 
             // Use HttpClient.
-            HttpClient client = new HttpClient()
+            client = new HttpClient()
             {
                 BaseAddress = new Uri(baseURI)
             };
 
             try
             {
-                //Make the get request
-                HttpResponseMessage response = await client.GetAsync(strGetRequest);
-
-                var responsePhrase = response.ReasonPhrase;
-                if (!responsePhrase.Equals("OK"))
-                {
-                    Console.WriteLine("Get request failed due to {0}", responsePhrase);
+                var tweetResult = GetTweets(strGetRequest).Result;
+                if (tweetResult == null)
                     return;
-                }
-
-                HttpContent content = response.Content;
-
-                // ... Read the string.
-                string result = await content.ReadAsStringAsync();
-
-                //Initialize deserialization with datetime using UTC
-                Newtonsoft.Json.JsonSerializerSettings js = new Newtonsoft.Json.JsonSerializerSettings()
-                {
-                    DateTimeZoneHandling = Newtonsoft.Json.DateTimeZoneHandling.Utc
-                };
-
-                //Get the list of responses
-                var tweetResult = Newtonsoft.Json.JsonConvert.DeserializeObject<List<Tweet>>(result, js);
-
-                //Initialize comparer to check for duplcate twees
-                var tweetComp = new TweetComparer();
-                var tweetResultDistinct = tweetResult.Distinct<Tweet>(tweetComp).AsParallel().ToList<Tweet>();
 
                 //Populate filtered list with the first Get results
-                filteredtweets = tweetResultDistinct.ToList();
+                filteredtweets = tweetResult.ToList();
 
-                // Now loop until we have reached the end date. We break out when we have a retrieval count < 100
-                while (tweetResult.Count > 0)
+                // Now loop until we have reached the desired end date. 
+                while (tweetResult.Count > 1)
                 {
                     //Set new start date to the date of the last item in the previous set of tweets
-                    var newStartDate = tweetResultDistinct[tweetResultDistinct.Count - 1].stamp.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                    var newStartDate = tweetResult[tweetResult.Count - 1].stamp.ToString("yyyy-MM-ddTHH:mm:ssZ");
                     strGetRequest = "api/v1/Tweets?startDate=" + newStartDate + "&endDate=" + endDate;
 
-                    response = await client.GetAsync(strGetRequest);
-                    content = response.Content;
+                    tweetResult = GetTweets(strGetRequest).Result;
+                    if (tweetResult == null)
+                        return;
 
-                    // ... Read the string.
-                    result = await content.ReadAsStringAsync();
-
-                    tweetResult = Newtonsoft.Json.JsonConvert.DeserializeObject<List<Tweet>>(result, js);
+                    //Get number of tweets
+                    int nCount = tweetResult.Count;
 
                     //Avoid duplicates in the get
-                    tweetResultDistinct = tweetResult.Distinct<Tweet>(tweetComp).AsParallel().ToList<Tweet>();
+                    tweetResult = tweetResult.Distinct<Tweet>(tweetComp).AsParallel().ToList<Tweet>();
 
-                    //Add to the filtered tweet list
-                    foreach (var tweet in tweetResultDistinct)
-                    {
-                        //Avoid adding duplicates to the full filtered list
-                        if (!filteredtweets.Contains(tweet, tweetComp))
-                            filteredtweets.Add(tweet);
-                    }
+                    //Add to filtered tweets
+                    filteredtweets.AddRange(tweetResult);
 
-                    //We have reached the final group of tweets within the date range
-                    if (tweetResult.Count < 100)
+                    //If less than 100 we are getting the last bit of tweets for the desired date range
+                    if (nCount < 100)
                         break;
+
                 }
 
             }
@@ -143,15 +138,56 @@ namespace TweetFilter
                 return;
             }
 
+            //Ensure last add tweets are distinct
+            filteredtweets = filteredtweets.Distinct<Tweet>(new TweetComparer()).AsParallel().ToList<Tweet>();
 
-            // ... Display the results
-            foreach (var tweet in filteredtweets)
+            // sw.Stop();
+            // var et = sw.ElapsedMilliseconds.ToString();
+
+
+        }
+
+        private static async Task<List<Tweet>> GetTweets(string strGetRequest)
+        {
+            try
             {
-                Console.WriteLine("ID: {0}, {1}", tweet.id, tweet.stamp);
-                Console.WriteLine("Tweet: {0}\n", tweet.text);
+                //Make the get request
+                HttpResponseMessage response = await client.GetAsync(strGetRequest);
+
+                var responsePhrase = response.ReasonPhrase;
+                if (!responsePhrase.Equals("OK"))
+                {
+                    Console.WriteLine("Get request failed due to {0}", responsePhrase);
+                    return null;
+                }
+
+                HttpContent content = response.Content;
+
+                // ... Read the string.
+                string result = await content.ReadAsStringAsync();
+
+                //Initialize deserialization with datetime using UTC
+                js = new Newtonsoft.Json.JsonSerializerSettings()
+                {
+                    DateTimeZoneHandling = Newtonsoft.Json.DateTimeZoneHandling.Utc
+                };
+
+                //Get the list of responses
+                var tweetResult = Newtonsoft.Json.JsonConvert.DeserializeObject<List<Tweet>>(result, js);
+
+                tweetResult.Distinct<Tweet>(tweetComp).AsParallel().ToList<Tweet>();
+
+                //Populate filtered list with the first Get results
+                return tweetResult;
+
+            }
+            catch (Exception e)
+            {
+                string error = e.ToString();
+                Console.WriteLine(error);
             }
 
-            Console.WriteLine("Total number of unique tweets between {0} and {1} is {2}", startDate, endDate, filteredtweets.Count);
+            return null;
 
         }
 
