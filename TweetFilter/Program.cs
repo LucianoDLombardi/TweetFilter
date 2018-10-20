@@ -34,7 +34,7 @@ namespace AllTweets
         }
     }
 
-    class Program
+    class GetTweetsCL
     {
         static readonly string baseURI = "https://badapi.Iqvia.io/";
 
