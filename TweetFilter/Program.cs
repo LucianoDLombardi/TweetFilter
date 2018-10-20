@@ -5,10 +5,6 @@ using System.Net.Http;
 using System.Threading.Tasks;
 using System.Diagnostics;
 
-//Comman line solution to the IQVIA bad api.
-//The user can input a start and end date and the application will report the distinct tweets within the 
-//given time period
-
 namespace AllTweets
 {
     //Tweet Model
@@ -19,7 +15,7 @@ namespace AllTweets
         public string text { get; set; }
     }
 
-    //Helper class to check for duplicate tweets
+    //Class to check for duplicate tweets
     public class TweetComparer : IEqualityComparer<Tweet>
     {
         public bool Equals(Tweet x, Tweet y)
@@ -40,66 +36,146 @@ namespace AllTweets
 
     class Program
     {
-        static string baseURI = "https://badapi.Iqvia.io/";
+        static readonly string baseURI = "https://badapi.Iqvia.io/";
+
         // Use HttpClient.
         static HttpClient client;
         static Newtonsoft.Json.JsonSerializerSettings js;
 
         //Initialize comparer to check for duplcate twees
-        static TweetComparer tweetComp = new TweetComparer();
-
-        //List of tweets with no duplicates
-        static List<Tweet> filteredtweets;
+        static readonly TweetComparer tweetComp = new TweetComparer();
 
         static void Main(string[] args)
         {
-            //Set window to be wider than default
+            //Adjust the console window
+            SetupDisplay();
+
+            //User input dates
+            var validStartDate = new DateTime(0);
+            var validEndDate = new DateTime(0);
+
+            //Get Dates from user or user pressed q to quit
+            var userQuit = false;
+
+            while (true)
+            {
+                (userQuit, validStartDate, validEndDate) = GetDatesFromUser();
+
+                if (userQuit)
+                    return;
+
+                Console.Clear();
+                Console.WriteLine("Downloading tweets...");
+
+                Parallel_GetAllTweetsInDateRange(validStartDate, validEndDate);
+            }
+
+
+        }
+
+        static void SetupDisplay()
+        {
+            //Set window to be a bit wider than default
             Console.WindowWidth = (int)(0.8 * Console.LargestWindowWidth);
 
             //Increase the buffer height to show all tweets
             Console.BufferHeight = 20000;
+        }
 
-            //Get dates from user and check if they are valid
-            if (!GetDatesFromUser(out string startDate, out string endDate))
+        static bool InitializeHTTP()
+        {
+            try
+            {
+                // Use HttpClient.
+                client = new HttpClient()
+                {
+                    BaseAddress = new Uri(baseURI)
+                };
+
+                //Initialize deserialization with datetime using UTC
+                js = new Newtonsoft.Json.JsonSerializerSettings()
+                {
+                    DateTimeZoneHandling = Newtonsoft.Json.DateTimeZoneHandling.Utc
+                };
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("Failed to initilize HTTP: " + e.ToString());
+                return false;
+            }
+
+            return true;
+        }
+
+        static public void Parallel_GetAllTweetsInDateRange(DateTime startDate, DateTime endDate)
+        {
+            if (!InitializeHTTP())
                 return;
 
-            Console.WriteLine("Downloading tweets...");
+            //Number of partitions for parrallel download
+            int nPartitions = Environment.ProcessorCount;
 
-            //Retrieve and output tweets
-            DownloadTweets(startDate, endDate);
+            //List of Lists for parallel download
+            List<List<Tweet>> allTweets = new List<List<Tweet>>();
+            for (int n = 0; n < nPartitions; n++)
+                allTweets.Add(new List<Tweet>());
+
+            // Stopwatch sw = new Stopwatch();
+            // sw.Start();
+
+            //Get the user defined date range in ticks
+            var dateRangeTicks = endDate.Ticks - startDate.Ticks;
+            var dateRangeIntervalTicks = (long)Math.Ceiling((double)dateRangeTicks / nPartitions);
+
+            //Retrieve  tweets
+            Parallel.For(0, allTweets.Count, n =>
+            {
+                long startTicks = startDate.Ticks + (long)n * dateRangeIntervalTicks;
+                long endTicks = startDate.Ticks + (long)(n + 1) * dateRangeIntervalTicks;
+                string start = new DateTime(startTicks).ToString();
+                string end = new DateTime(endTicks).ToString();
+
+                allTweets[n] = DownloadTweets(start, end);
+            });
+
+            // sw.Stop();
+            // var et = sw.ElapsedMilliseconds.ToString();
+
+            List<Tweet> allTweetsCombined = new List<Tweet>();
+            for (int n = 0; n < nPartitions; n++)
+            {
+                allTweetsCombined.AddRange(allTweets[n]);
+            }
+
+            //Remove final duplicates
+            allTweetsCombined = allTweetsCombined.Distinct<Tweet>(new TweetComparer()).AsParallel().ToList<Tweet>();
 
             // ... Display the results
-            foreach (var tweet in filteredtweets)
+            foreach (var tweet in allTweetsCombined)
             {
                 Console.WriteLine("ID: {0}, {1}", tweet.id, tweet.stamp);
                 Console.WriteLine("Tweet: {0}\n", tweet.text);
             }
 
-            Console.WriteLine("Total number of distinct tweets between {0} and {1} is {2}", startDate, endDate, filteredtweets.Count);
-            Console.ReadLine();
+            Console.WriteLine("Total number of distinct tweets between {0} and {1} is {2}\n", startDate, endDate, allTweetsCombined.Count);
         }
 
-        private static void DownloadTweets(string startDate, string endDate)
+        private static List<Tweet> DownloadTweets(string startDate, string endDate)
         {
+            //List of tweets with no duplicates
+            List<Tweet> filteredtweets = new List<Tweet>();
+
             //Stopwatch sw = new Stopwatch();
             //sw.Start();
-
-            filteredtweets = new List<Tweet>();
 
             // Target.
             string strGetRequest = "api/v1/Tweets?startDate=" + startDate + "&endDate=" + endDate;
 
-            // Use HttpClient.
-            client = new HttpClient()
-            {
-                BaseAddress = new Uri(baseURI)
-            };
-
             try
             {
-                var tweetResult = GetTweets(strGetRequest).Result;
+                var tweetResult = GetTweetsAsync(strGetRequest).Result;
                 if (tweetResult == null)
-                    return;
+                    return null;
 
                 //Populate filtered list with the first Get results
                 filteredtweets = tweetResult.ToList();
@@ -111,9 +187,9 @@ namespace AllTweets
                     var newStartDate = tweetResult[tweetResult.Count - 1].stamp.ToString("yyyy-MM-ddTHH:mm:ssZ");
                     strGetRequest = "api/v1/Tweets?startDate=" + newStartDate + "&endDate=" + endDate;
 
-                    tweetResult = GetTweets(strGetRequest).Result;
+                    tweetResult = GetTweetsAsync(strGetRequest).Result;
                     if (tweetResult == null)
-                        return;
+                        return null;
 
                     //Get number of tweets
                     int nCount = tweetResult.Count;
@@ -135,19 +211,22 @@ namespace AllTweets
             {
                 string error = e.ToString();
                 Console.WriteLine(error);
-                return;
+                return null;
             }
 
             //Ensure last add tweets are distinct
             filteredtweets = filteredtweets.Distinct<Tweet>(new TweetComparer()).AsParallel().ToList<Tweet>();
 
-            // sw.Stop();
-            // var et = sw.ElapsedMilliseconds.ToString();
+            //sw.Stop();
+            //var et = sw.ElapsedMilliseconds.ToString();
+
+            return filteredtweets;
+
 
 
         }
 
-        private static async Task<List<Tweet>> GetTweets(string strGetRequest)
+        private static async Task<List<Tweet>> GetTweetsAsync(string strGetRequest)
         {
             try
             {
@@ -166,11 +245,7 @@ namespace AllTweets
                 // ... Read the string.
                 string result = await content.ReadAsStringAsync();
 
-                //Initialize deserialization with datetime using UTC
-                js = new Newtonsoft.Json.JsonSerializerSettings()
-                {
-                    DateTimeZoneHandling = Newtonsoft.Json.DateTimeZoneHandling.Utc
-                };
+
 
                 //Get the list of responses
                 var tweetResult = Newtonsoft.Json.JsonConvert.DeserializeObject<List<Tweet>>(result, js);
@@ -191,63 +266,64 @@ namespace AllTweets
 
         }
 
-        static bool AreDatesValid(string start, string end)
+        static (bool, DateTime, DateTime) AreDatesValid(string start, string end)
         {
             var startDate = new DateTime();
             if (!DateTime.TryParse(start, out startDate))
             {
                 Console.WriteLine("Invalid start date");
-                return false;
+                return (false, new DateTime(), new DateTime());
             }
 
             var endDate = new DateTime();
             if (!DateTime.TryParse(end, out endDate))
             {
                 Console.WriteLine("Invalid end date");
-                return false;
+                return (false, new DateTime(), new DateTime());
             }
 
             if (DateTime.Compare(startDate, endDate) > 0)
             {
                 Console.WriteLine("Start date cannot be after the end date.");
-                return false;
+                return (false, new DateTime(), new DateTime());
             }
 
             if (DateTime.Compare(startDate, endDate) == 0)
             {
                 Console.WriteLine("Start date and end date cannot be the same value.");
-                return false;
+                return (false, new DateTime(), new DateTime());
             }
 
-            return true;
+            return (true, startDate, endDate);
         }
 
-        static bool GetDatesFromUser(out string startDate, out string endDate)
+        //Retrieve the dates from the user or quit if user presses q
+        static (bool, DateTime, DateTime) GetDatesFromUser()
         {
-            startDate = "";
-            endDate = "";
+            DateTime validStartDate = new DateTime(0);
+            DateTime validEndDate = new DateTime(0);
 
             var DatesValid = false;
 
             while (!DatesValid)
             {
                 Console.WriteLine("Please enter the start date for tweet retrieval (ex. 2016-01-01T00:00:00, note: time is optional). Press q to quit");
-                startDate = Console.ReadLine();
+                var startDate = Console.ReadLine();
 
                 if (startDate.ToLower() == "q")
-                    return false;
+                    return (true, validStartDate, validEndDate);
 
                 Console.WriteLine("Please enter the end date for tweet retrieval (ex. 2018-01-01T00:00:00, note: time is optional). Press q to quit");
-                endDate = Console.ReadLine();
+                var endDate = Console.ReadLine();
 
                 if (endDate.ToLower() == "q")
-                    return false;
+                    return (true, validStartDate, validEndDate);
 
-                DatesValid = AreDatesValid(startDate, endDate);
+                (DatesValid, validStartDate, validEndDate) = AreDatesValid(startDate, endDate);
 
             }
 
-            return true;
+            return (false, validStartDate, validEndDate);
         }
     }
 }
